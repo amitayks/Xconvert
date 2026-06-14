@@ -1,0 +1,61 @@
+schema: spec-driven
+
+context: |
+  Project: Xconvert — a standalone, fully-local macOS app that converts any
+  video file to X (Twitter) tweet-video spec via a simple drag-and-drop UI.
+
+  Why it exists: X silently rejects out-of-spec tweet video with
+  400 "Your media IDs are invalid" — the chunked upload reports success but
+  POST /2/tweets refuses out-of-spec media. Confirmed trigger: Mac ProMotion
+  screen recordings at native resolution/fps (e.g. 3024x1964 @ 120 fps). A
+  spec-compliant transcode of the same clip posts immediately. This app is the
+  local converter the user runs before uploading through their posting tool.
+  (Originated from the MusePostBot `mac-video-converter` handoff proposal;
+  this is its own separate project — no MusePostBot/Worker/webapp dependency.)
+
+  Tech stack / architecture:
+  - SwiftUI native macOS app (Xcode), dark mode.
+  - HYBRID engine: AVFoundation for INSPECTION (duration, dimensions, fps,
+    audio-track presence, color transfer / HDR) + a BUNDLED static arm64
+    ffmpeg binary at Contents/Resources/ffmpeg, invoked via Foundation
+    Process for the actual transcode. No ffprobe (AVAsset replaces it).
+  - Fully offline: no network, no API, no telemetry.
+
+  Target output (validated to actually post to X): MP4 container, H.264 High +
+  AAC, <=1280 on the longest edge (well under X's 1920x1200), 30 fps, yuv420p,
+  +faststart. Written as <name>-x.mp4 next to the original, revealed in Finder.
+
+  Validated ffmpeg command (the known-good output):
+    ffmpeg -y -i IN \
+      -vf "fps=30,scale='min(1280,iw)':-2,format=yuv420p" \
+      -c:v libx264 -profile:v high -preset veryfast -b:v 5M -maxrate 6M -bufsize 8M \
+      -c:a aac -b:a 128k -movflags +faststart  OUT
+  Two real branches off inspection: (1) source has NO audio track -> inject a
+  silent AAC track (anullsrc, stereo 44100) with -shortest; (2) source is HDR
+  (HLG/PQ transfer) -> tonemap to SDR before format=yuv420p. Everything else
+  is one unconditional filter chain (fps + scale-box are no-ops when already
+  small/slow). The scale box should cap the LONGEST edge so portrait clips
+  don't exceed the height cap.
+
+  X tweet-video spec (target): MP4 H.264 (High/Main) + AAC; <=1920x1200
+  (we target <=1280 wide for headroom); <=60 fps (we target 30); duration
+  <=140 s non-Premium (the user is X Premium, so treat as informational);
+  <=512 MB; yuv420p; aspect 1:3 to 3:1.
+
+  macOS packaging notes (bite Swift newcomers): App Sandbox OFF (the app writes
+  a sibling output file and launches an embedded executable — sandbox would
+  block both); ad-hoc / personal signing is fine; right-click -> Open clears
+  Gatekeeper on first launch; notarization (Apple Developer $99/yr) only needed
+  to hand the app to others. The bundled ffmpeg must be a STATIC arm64 build
+  (Homebrew's is dynamically linked) and keep its executable bit inside the
+  .app. With Hardened Runtime on, also sign the embedded ffmpeg or add the
+  disable-library-validation entitlement.
+
+# Per-artifact rules (optional)
+rules:
+  proposal:
+    - Keep it self-contained — a reader who never saw MusePostBot should
+      understand why this app exists and what "X spec" means.
+  tasks:
+    - Group tasks by area (project scaffold, inspection, transcode engine,
+      UI/state machine, packaging) and keep each task small and verifiable.
