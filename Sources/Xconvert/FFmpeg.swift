@@ -183,51 +183,84 @@ private final class ProcessOutputCollector: @unchecked Sendable {
     }
 }
 
+/// Holds the live ffmpeg `Process` so it can be terminated from outside the
+/// runner — e.g. when the app quits mid-conversion. Lock-guarded so it's safe
+/// to terminate from the main thread while the process runs elsewhere.
+final class FFmpegProcessHandle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+
+    func adopt(_ process: Process) {
+        lock.lock(); self.process = process; lock.unlock()
+    }
+
+    func clear() {
+        lock.lock(); self.process = nil; lock.unlock()
+    }
+
+    /// Terminate the running process (SIGTERM) and block until it exits, so no
+    /// child outlives the app. Idempotent; a no-op when nothing is running.
+    func terminate() {
+        lock.lock(); let process = self.process; lock.unlock()
+        guard let process, process.isRunning else { return }
+        process.terminate()
+        process.waitUntilExit()
+    }
+}
+
 enum FFmpegRunner {
     static func run(
         plan: FFmpegPlan,
         duration: Double,
+        handle processHandle: FFmpegProcessHandle? = nil,
         onProgress: @escaping (Double) -> Void
     ) async throws {
         let collector = ProcessOutputCollector(duration: duration, onProgress: onProgress)
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let process = Process()
-            process.executableURL = plan.executable
-            process.arguments = plan.arguments
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let process = Process()
+                process.executableURL = plan.executable
+                process.arguments = plan.arguments
 
-            let outPipe = Pipe()
-            let errPipe = Pipe()
-            process.standardOutput = outPipe
-            process.standardError = errPipe
+                let outPipe = Pipe()
+                let errPipe = Pipe()
+                process.standardOutput = outPipe
+                process.standardError = errPipe
 
-            outPipe.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                if !data.isEmpty { collector.appendStdout(data) }
-            }
-            errPipe.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                if !data.isEmpty { collector.appendStderr(data) }
-            }
+                outPipe.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    if !data.isEmpty { collector.appendStdout(data) }
+                }
+                errPipe.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    if !data.isEmpty { collector.appendStderr(data) }
+                }
 
-            process.terminationHandler = { proc in
-                outPipe.fileHandleForReading.readabilityHandler = nil
-                errPipe.fileHandleForReading.readabilityHandler = nil
-                if proc.terminationStatus == 0 {
-                    onProgress(1.0)
-                    continuation.resume(returning: ())
-                } else {
-                    continuation.resume(
-                        throwing: FFmpegError.nonZeroExit(proc.terminationStatus, collector.stderrString())
-                    )
+                process.terminationHandler = { proc in
+                    outPipe.fileHandleForReading.readabilityHandler = nil
+                    errPipe.fileHandleForReading.readabilityHandler = nil
+                    processHandle?.clear()
+                    if proc.terminationStatus == 0 {
+                        onProgress(1.0)
+                        continuation.resume(returning: ())
+                    } else {
+                        continuation.resume(
+                            throwing: FFmpegError.nonZeroExit(proc.terminationStatus, collector.stderrString())
+                        )
+                    }
+                }
+
+                do {
+                    processHandle?.adopt(process)
+                    try process.run()
+                } catch {
+                    processHandle?.clear()
+                    continuation.resume(throwing: FFmpegError.launchFailed(error.localizedDescription))
                 }
             }
-
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(throwing: FFmpegError.launchFailed(error.localizedDescription))
-            }
+        } onCancel: {
+            processHandle?.terminate()
         }
     }
 }

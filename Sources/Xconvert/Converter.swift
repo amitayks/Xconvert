@@ -15,6 +15,9 @@ final class Converter: ObservableObject {
     @Published var phase: Phase = .idle
     @Published var isTargeted = false
 
+    private var conversionTask: Task<Void, Never>?
+    private let processHandle = FFmpegProcessHandle()
+
     var isBusy: Bool {
         switch phase {
         case .inspecting, .converting: return true
@@ -29,10 +32,19 @@ final class Converter: ObservableObject {
 
     func convert(url: URL) {
         guard !isBusy else { return }
-        Task { await run(url: url) }
+        conversionTask = Task { await run(url: url) }
     }
 
     func reset() { phase = .idle }
+
+    /// Cancel an in-flight conversion and terminate the ffmpeg child
+    /// synchronously, so app teardown can't leave an orphaned process. A
+    /// cancelled conversion never reaches `.done`, so no partial output is
+    /// reported as finished.
+    func terminateNow() {
+        conversionTask?.cancel()
+        processHandle.terminate()
+    }
 
     private func run(url: URL) async {
         phase = .inspecting
@@ -48,7 +60,7 @@ final class Converter: ObservableObject {
             phase = .converting(0)
             let plan = FFmpegPlan.build(input: url, info: info, ffmpeg: ffmpeg, canTonemap: canTonemap)
 
-            try await FFmpegRunner.run(plan: plan, duration: info.durationSeconds) { [weak self] fraction in
+            try await FFmpegRunner.run(plan: plan, duration: info.durationSeconds, handle: processHandle) { [weak self] fraction in
                 Task { @MainActor in
                     guard let self else { return }
                     if case .converting = self.phase {
