@@ -18,6 +18,11 @@ cp "$BIN_DIR/Xconvert" "$APP/Contents/MacOS/Xconvert"
 chmod +x "$APP/Contents/MacOS/Xconvert"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 
+if [ -f "$ROOT/Resources/AppIcon.icns" ]; then
+    cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+    echo "==> added app icon"
+fi
+
 if [ -f "$ROOT/Vendor/ffmpeg" ]; then
     cp "$ROOT/Vendor/ffmpeg" "$APP/Contents/Resources/ffmpeg"
     chmod +x "$APP/Contents/Resources/ffmpeg"
