@@ -44,8 +44,9 @@ final class Converter: ObservableObject {
 
         do {
             let info = try await VideoInspector.inspect(url: url)
+            let canTonemap = info.isHDR && FFmpegCapabilities.supports(filter: "zscale", ffmpeg: ffmpeg)
             phase = .converting(0)
-            let plan = FFmpegPlan.build(input: url, info: info, ffmpeg: ffmpeg)
+            let plan = FFmpegPlan.build(input: url, info: info, ffmpeg: ffmpeg, canTonemap: canTonemap)
 
             try await FFmpegRunner.run(plan: plan, duration: info.durationSeconds) { [weak self] fraction in
                 Task { @MainActor in

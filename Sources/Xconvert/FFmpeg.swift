@@ -22,13 +22,56 @@ enum FFmpegLocator {
     }
 }
 
+/// Queries (and caches) which filters a given ffmpeg binary supports, so we can
+/// degrade gracefully when a build lacks an optional filter (e.g. `zscale`,
+/// which needs libzimg and is required by the HDR tonemap chain).
+enum FFmpegCapabilities {
+    private static let lock = NSLock()
+    private static var cache: [String: Set<String>] = [:]
+
+    static func supports(filter: String, ffmpeg: URL) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if let filters = cache[ffmpeg.path] {
+            return filters.contains(filter)
+        }
+        let filters = queryFilters(ffmpeg)
+        cache[ffmpeg.path] = filters
+        return filters.contains(filter)
+    }
+
+    private static func queryFilters(_ ffmpeg: URL) -> Set<String> {
+        let process = Process()
+        process.executableURL = ffmpeg
+        process.arguments = ["-hide_banner", "-filters"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        guard (try? process.run()) != nil else { return [] }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard let text = String(data: data, encoding: .utf8) else { return [] }
+
+        var names = Set<String>()
+        for line in text.split(separator: "\n") {
+            // Each filter line looks like: " T.. name  in->out  description"
+            let parts = line.split(separator: " ", omittingEmptySubsequences: true)
+            if parts.count >= 2 { names.insert(String(parts[1])) }
+        }
+        return names
+    }
+}
+
 /// The exact ffmpeg invocation, derived from the source's inspected properties.
 struct FFmpegPlan {
     let executable: URL
     let arguments: [String]
     let outputURL: URL
 
-    static func build(input: URL, info: SourceInfo, ffmpeg: URL) -> FFmpegPlan {
+    /// - Parameter canTonemap: whether the chosen ffmpeg supports `zscale`
+    ///   (libzimg). When an HDR source meets a build without it, we fall back to
+    ///   a plain SDR conversion — still in-spec/postable, just not tonemapped.
+    static func build(input: URL, info: SourceInfo, ffmpeg: URL, canTonemap: Bool) -> FFmpegPlan {
         let dir = input.deletingLastPathComponent()
         let base = input.deletingPathExtension().lastPathComponent
         let output = dir.appendingPathComponent("\(base)-x.mp4")
@@ -38,7 +81,7 @@ struct FFmpegPlan {
         let scale = "scale=w=1280:h=1280:force_original_aspect_ratio=decrease:force_divisible_by=2"
 
         let vf: String
-        if info.isHDR {
+        if info.isHDR && canTonemap {
             // Tonemap HDR (HLG/PQ) -> SDR BT.709 before yuv420p. Requires an
             // ffmpeg built with libzimg (zscale).
             vf = "fps=30,"

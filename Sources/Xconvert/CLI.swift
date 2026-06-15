@@ -22,12 +22,14 @@ enum CLI {
                 err("ffmpeg: \(ffmpeg.path)\(FFmpegLocator.isBundled(ffmpeg) ? " (bundled)" : " (system fallback)")")
 
                 let info = try await VideoInspector.inspect(url: url)
+                let canTonemap = info.isHDR && FFmpegCapabilities.supports(filter: "zscale", ffmpeg: ffmpeg)
+                let hdrNote = info.isHDR ? (canTonemap ? "yes (tonemap)" : "yes (no zscale → SDR fallback)") : "no"
                 err("source: \(info.width)x\(info.height) @ \(Int(info.fps.rounded()))fps  "
                     + "audio=\(info.hasAudio ? "yes" : "no (will inject silent)")  "
-                    + "hdr=\(info.isHDR ? "yes (tonemap)" : "no")  "
+                    + "hdr=\(hdrNote)  "
                     + "duration=\(String(format: "%.1f", info.durationSeconds))s")
 
-                let plan = FFmpegPlan.build(input: url, info: info, ffmpeg: ffmpeg)
+                let plan = FFmpegPlan.build(input: url, info: info, ffmpeg: ffmpeg, canTonemap: canTonemap)
 
                 var lastDecile = -1
                 try await FFmpegRunner.run(plan: plan, duration: info.durationSeconds) { fraction in
